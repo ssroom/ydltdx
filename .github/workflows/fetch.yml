@@ -2,8 +2,8 @@ name: Fetch Cloudflare IPs
 
 on:
   schedule:
-    - cron: '*/15 * * * *'  # 每15分鐘執行一次
-  workflow_dispatch:          # 允許手動觸發
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
 
 jobs:
   fetch:
@@ -15,42 +15,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Fetch IPs from wetest.vip
+      - name: Fetch and process IPs
         run: |
           mkdir -p data/history
 
-          # 抓取最新數據
           curl -s "https://www.wetest.vip/api/cf2dns/get_cloudflare_ip?key=o1zrmHAF&type=v4" \
             -H "User-Agent: Mozilla/5.0" \
             -o data/latest.json
 
-          # 驗證是否成功
-          if ! python3 -c "import json,sys; d=json.load(open('data/latest.json')); print(f'Got {len(d[\"info\"])} IPs')" 2>/dev/null; then
-            echo "Fetch failed or invalid JSON"
-            cat data/latest.json
-            exit 1
-          fi
-
-          # 生成帶時間戳的歷史快照
-          TIMESTAMP=$(date -u +"%Y%m%d_%H%M%S")
-          cp data/latest.json "data/history/${TIMESTAMP}.json"
-
-          # 同時生成純 IP 列表（方便直接用）
-          python3 - <<'EOF'
-          import json, datetime
+          python3 - << 'PYEOF'
+          import json, csv, datetime, os, shutil
 
           with open('data/latest.json') as f:
               data = json.load(f)
 
           info = data.get('info', [])
+          now = datetime.datetime.utcnow()
+          timestamp = now.strftime('%Y%m%d_%H%M%S')
 
-          # 純 IP 列表
+          shutil.copy('data/latest.json', f'data/history/{timestamp}.json')
+
           ips = [item['ip'] for item in info if item.get('ip')]
           with open('data/ip_list.txt', 'w') as f:
               f.write('\n'.join(ips))
 
-          # 生成 CSV（方便篩選）
-          import csv
           with open('data/latest.csv', 'w', newline='') as f:
               writer = csv.DictWriter(f, fieldnames=['ip','delay','speed','loss','type','colo'])
               writer.writeheader()
@@ -64,61 +52,66 @@ jobs:
                       'colo':  item.get('colo', item.get('region','')),
                   })
 
-          # 更新 README
-          now = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
           delays = [float(i['delay']) for i in info if i.get('delay')]
-          speeds = [float(i['speed']) for i in info if i.get('speed') and float(i.get('speed',0))>0]
+          speeds = [float(i['speed']) for i in info if i.get('speed') and float(i.get('speed',0)) > 0]
           avg_delay = round(sum(delays)/len(delays), 1) if delays else 0
           avg_speed = round(sum(speeds)/len(speeds), 2) if speeds else 0
+          now_str = now.strftime('%Y-%m-%d %H:%M:%S UTC')
+
+          repo = os.environ.get('GITHUB_REPOSITORY', 'YOUR_USER/YOUR_REPO')
 
           readme = f"""# Cloudflare IP 自動抓取
 
-          數據來源：[wetest.vip](https://www.wetest.vip/page/cloudflare/address_v4.html)  
-          每 15 分鐘自動更新一次（GitHub Actions）
+數據來源：[wetest.vip](https://www.wetest.vip/page/cloudflare/address_v4.html)
+每 15 分鐘自動更新（GitHub Actions）
 
-          ## 最新數據摘要
+## 最新數據
 
-          | 項目 | 數值 |
-          |------|------|
-          | 更新時間 | {now} |
-          | IP 總數 | {len(info)} |
-          | 平均延遲 | {avg_delay} ms |
-          | 平均速度 | {avg_speed} MB/s |
+| 項目 | 數值 |
+|------|------|
+| 更新時間 | {now_str} |
+| IP 總數 | {len(info)} |
+| 平均延遲 | {avg_delay} ms |
+| 平均速度 | {avg_speed} MB/s |
 
-          ## 文件說明
+## 文件說明
 
-          | 文件 | 說明 |
-          |------|------|
-          | `data/latest.json` | 最新完整 JSON 數據 |
-          | `data/latest.csv` | 最新 CSV（可用 Excel 打開篩選）|
-          | `data/ip_list.txt` | 純 IP 列表，每行一個 |
-          | `data/history/` | 歷史快照（每次更新保存） |
+| 文件 | 說明 |
+|------|------|
+| `data/latest.json` | 完整 JSON |
+| `data/latest.csv` | CSV，可用 Excel 篩選 |
+| `data/ip_list.txt` | 純 IP 列表，每行一個 |
+| `data/history/` | 歷史快照（保留最近 200 次）|
 
-          ## 直接獲取數據
+## 直接獲取
 
-          ```bash
-          # 獲取最新 IP 列表
-          curl -s https://raw.githubusercontent.com/${{GITHUB_REPOSITORY}}/main/data/ip_list.txt
+```
+# 純 IP 列表
+https://raw.githubusercontent.com/{repo}/main/data/ip_list.txt
 
-          # 獲取完整 JSON
-          curl -s https://raw.githubusercontent.com/${{GITHUB_REPOSITORY}}/main/data/latest.json
-          ```
-          """
+# 完整 JSON
+https://raw.githubusercontent.com/{repo}/main/data/latest.json
+
+# CSV
+https://raw.githubusercontent.com/{repo}/main/data/latest.csv
+```
+"""
           with open('README.md', 'w') as f:
               f.write(readme)
 
-          print(f"Done: {len(info)} IPs, avg delay {avg_delay}ms, avg speed {avg_speed}MB/s")
-          EOF
+          print(f"OK: {len(info)} IPs, avg {avg_delay}ms, {avg_speed}MB/s")
+          PYEOF
 
-      - name: Clean old history (keep last 200 files)
+      - name: Clean old history (keep last 200)
         run: |
           cd data/history
           ls -t | tail -n +201 | xargs -r rm --
 
       - name: Commit and push
         run: |
-          git config user.name  "github-actions[bot]"
+          git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
-          git diff --cached --quiet || git commit -m "update: $(date -u +'%Y-%m-%d %H:%M') UTC · $(python3 -c "import json; print(len(json.load(open('data/latest.json'))['info']),'IPs')")"
+          COUNT=$(python3 -c "import json; print(len(json.load(open('data/latest.json'))['info']))")
+          git diff --cached --quiet || git commit -m "update $(date -u +'%Y-%m-%d %H:%M') UTC · ${COUNT} IPs"
           git push
